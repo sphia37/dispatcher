@@ -10,44 +10,75 @@ def get_arg_value(arg_name: str, args, kwargs, func):
     
     return args[get_arg_index(arg_name, func)] if arg_value is None else arg_value
 
+def is_compatible(arg_type, param_type):
+    return param_type is Any or issubclass(arg_type, param_type)
+
+def overloads_match(args, overload):
+    return all(is_compatible(type(arg), param) for arg, param in zip(args, overload))
+
+def find_best_overload(overloads, args):
+    matching_overloads = {}
+    for overload in overloads:
+        if overloads_match(args, overload):
+            i = sum(1 for param in overload if param is not Any)
+            if i not in matching_overloads:
+                matching_overloads[i] = []
+            matching_overloads[i].append(overload)
+    
+    max_idx = max(matching_overloads.keys())
+    
+    if len(matching_overloads[max_idx]) > 1:
+        raise ValueError("Ambiguous overload")
+
+    return matching_overloads[max_idx][0]
+
 class Dispatch:
-    arg: int | str
-    def get_overloads(self) -> list:
-        return self.dispatchs[self.func.__name__]
-    def __init__(self, func, arg: int | str, dispatchs = {}):
-        self.dispatchs = dispatchs
+    args: list[int | str]
+
+    def update(self):
+        self.types = [[
+                Any
+                if y == inspect._empty
+                else y
+                    for y in [(x[arg].annotation if isinstance(arg, str) else list(x.values())[arg].annotation) 
+                        for x in [inspect.signature(vis).parameters for vis in self.overloads]]]
+                            for arg in self.args]
+        self.__signature__ = self.get_signature()
+    def __init__(self, func, *args: int | str):
         self.func = func
-        if func.__name__ not in dispatchs:
-            dispatchs[func.__name__] = []
-        dispatchs[func.__name__].append(self)
-        self.overloads = self.get_overloads()
-        self.arg = self.overloads[-2].arg if len(self.overloads) > 1 else arg
-        self.types = [Any if x == inspect._empty else x for x in [(x[self.arg].annotation if isinstance(self.arg, str) else list(x.values())[self.arg].annotation) 
-                for x in 
-                [inspect.signature(vis.func).parameters for vis in self.overloads]]]
+        self.overloads = []
+        self.overloads.append(self.func)
+        self.args = list(args)
+        self.update()
     def get_signature(self): 
-        return inspect.signature(self.func).replace(parameters=
-                                 [(x.replace(annotation=functools.reduce(lambda x, y: x | y, self.types)) 
-                                            if i == (self.arg if isinstance(self.arg, int) else get_arg_index(self.arg, self.func)) else x)
-                                    for i, x in
-                                    enumerate(inspect.signature(self.func).parameters.values())])
+        index_to_types = {
+            i: functools.reduce(lambda x, y: x | y, types) for i, types in 
+                zip({get_arg_index(arg, self.func) if not isinstance(arg, int) else arg for arg in self.args},
+                    self.types)}
+        return inspect.signature(self.func).replace(
+            parameters=[
+                param.replace(annotation=index_to_types[i]) 
+                if i in index_to_types else param 
+                for i, param in enumerate(inspect.signature(self.func).parameters.values())
+            ])
     def __call__(self, *args, **kwargs):
-        t = type(args[self.arg] if isinstance(self.arg, int) else get_arg_value(self.arg, args, kwargs, self.func))
-        f = lambda x: self.overloads[self.types.index(x)].func(*args, **kwargs)
-        if t in self.types:
-            return f(t)
-        elif Any in self.types:
-            return f(Any)
-        else:
-            raise ValueError(f"Invalid type for overloaded function {self.func.__name__}")
+        cargs = [args[arg] if isinstance(arg, int) else get_arg_value(arg, args, kwargs, self.func) for arg in self.args]
+        types = [list(item) for item in zip(*self.types)]
+        overload = find_best_overload( types
+                                      ,cargs)
+        return self.overloads[types.index(overload)](*args, **kwargs)
+    def register(self, func):
+        self.overloads.append(func)
+        self.update()
+        return func
 
 
-def dispatch(value):
-    if isinstance(value, int | str):
+
+def dispatch(*value):
+    if isinstance(value[0], int | str):
         def _(func):
-            data = Dispatch(func, value);
+            data = Dispatch(func, *value);
             response = functools.wraps(func)(data)
-            response.__signature__ = data.get_signature()
             return response
         return _
     return dispatch(0)(value)
